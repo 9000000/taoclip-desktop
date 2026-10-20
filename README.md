@@ -2,6 +2,10 @@
 
 TaoClip Desktop is a Windows video editor built with Electron, React, Vite and FFmpeg. It edits media locally on your computer and supports multi-clip projects, AI-assisted tools, and exports for common social video formats.
 
+**Website:** [taoclip.com](https://taoclip.com) · **Windows download:** [taoclip.com/tai-ve](https://taoclip.com/tai-ve/)
+
+![TaoClip Desktop screenshot](assets/taoclip-desktop-screenshot.png)
+
 > This repository contains the application source code. It does not include the AI model files or the `yt-dlp` executable. The app downloads some assets when you use the related features.
 
 ## Features
