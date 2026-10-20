@@ -1,0 +1,17 @@
+node_modules/
+dist/
+release/
+.testout/
+*.log
+.DS_Store
+
+# Models qua lon cho GitLab (>100MB/file)
+models/inswapper_128.onnx
+models/w600k_r50.onnx
+
+# Runtime-downloaded tools and AI models. Verify each model license before redistribution.
+bin/
+models/
+.env
+.env.*
+!.env.example
