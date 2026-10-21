@@ -17,7 +17,7 @@ async function getTts(onStatus, modelCacheDir) {
   const pending = (async () => {
     const { pipeline, env } = await import('@huggingface/transformers')
     cacheRoot = modelCacheDir || cacheRoot
-    if (cacheRoot) env.cacheDir = cacheRoot
+    if (cacheRoot) { fs.mkdirSync(cacheRoot, { recursive: true }); env.cacheDir = cacheRoot }
     env.useFSCache = true
     env.allowLocalModels = false
     const opts = {}

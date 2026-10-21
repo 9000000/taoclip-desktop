@@ -27,6 +27,10 @@ ops.configure(ffmpegPath, ffprobePath)
 const isDev = process.env.NODE_ENV === 'development'
 let gpuEncoder = 'cpu' // tu do khi app san sang
 
+// Thu muc cache model transformers.js (Whisper/TTS) - PHAI ghi duoc.
+// Mac dinh transformers ghi vao node_modules/.../.cache => trong app.asar (file) => ENOTDIR.
+const tfCacheDir = () => path.join(app.getPath('userData'), 'ai-models')
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1280,
@@ -171,6 +175,7 @@ ipcMain.handle('video:detectSilence', async (_e, filePath, opts) => {
 // Tao phu de tu dong bang Whisper (local). opts.clips -> ca timeline; nguoc lai 1 file
 ipcMain.handle('captions:generate', async (event, filePath, opts) => {
   const whisper = require('./whisper.cjs') // nap muon (transformers nang)
+  whisper.configure(tfCacheDir())
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taoclip-cap-'))
   try {
     const wav = path.join(tmpDir, 'a.wav')
@@ -344,7 +349,7 @@ ipcMain.handle('redub:generate', async (event, payload) => {
         if (!assetPath.startsWith(assetRoot) || !fs.existsSync(assetPath)) throw new Error(`Audio câu ${i + 1} không còn tồn tại trong kho TTS.`)
         fs.copyFileSync(assetPath, f)
       } else if (g) await g.synthesize(s.text, f, { apiKey: key, voiceName: ttsCfg.voice, langCode: ttsCfg.langCode || 'vi-VN', rate: ttsCfg.rate ?? 1, pitch: ttsCfg.pitch ?? 0 })
-      else await ttsLocal.synthesize(s.text, f, { onStatus: (st) => { if (st.phase === 'download') send(st) } })
+      else await ttsLocal.synthesize(s.text, f, { modelCacheDir: path.join(app.getPath('userData'), 'models', 'transformers'), onStatus: (st) => { if (st.phase === 'download') send(st) } })
       // slot = cho trong toi da cua cau nay (den cau ke tiep / het timeline)
       const next = segs[i + 1]
       parts.push({ path: f, start: s.start, slot: Math.max(0.3, (next ? next.start : totalDur) - s.start) })

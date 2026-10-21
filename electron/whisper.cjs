@@ -6,6 +6,10 @@ const fs = require('fs')
 
 let pipePromise = null
 let loadedModel = null
+let CACHE_DIR = null
+
+// Dat thu muc cache model (goi tu main voi userData) - tranh ghi vao app.asar (ENOTDIR) khi dong goi
+function configure(cacheDir) { CACHE_DIR = cacheDir }
 
 // transformers.js la ESM -> dung dynamic import trong .cjs
 async function getPipe(model, onStatus) {
@@ -13,6 +17,7 @@ async function getPipe(model, onStatus) {
   loadedModel = model
   const pending = (async () => {
     const { pipeline, env } = await import('@huggingface/transformers')
+    if (CACHE_DIR) { try { fs.mkdirSync(CACHE_DIR, { recursive: true }) } catch {} env.cacheDir = CACHE_DIR }
     env.allowLocalModels = false // luon dung model tu Hugging Face hub
     const opts = { dtype: 'q8' }
     if (onStatus) opts.progress_callback = (p) => {
@@ -72,4 +77,4 @@ async function transcribe(wavPath, { language = 'vietnamese', model = 'Xenova/wh
     .filter((c) => c.text && c.end > c.start)
 }
 
-module.exports = { transcribe }
+module.exports = { transcribe, configure }
