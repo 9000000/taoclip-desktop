@@ -2,6 +2,7 @@
 import {
   Film, Music, Type, Smile, Sparkles, ArrowLeftRight, SlidersHorizontal
 } from 'lucide-react'
+import FILTER_PRESETS from '../shared/filter-presets.json'
 
 export function fmt(t) {
   if (!t || t < 0) t = 0
@@ -18,15 +19,17 @@ export const RE_IMAGE = /\.(jpe?g|png|webp|bmp|gif)$/i
 export const RE_AUDIO = /\.(mp3|wav|m4a|aac|ogg|flac)$/i
 export const isImg = (c) => c && c.kind === 'image'
 export const clipOut = (c) => (c.out - c.in) / (c.speed || 1)
-export const FILTERS = [
-  { k: 'none', css: 'none', ff: null },
-  { k: 'bright', css: 'brightness(1.12) contrast(1.05)', ff: 'eq=brightness=0.06:contrast=1.1' },
-  { k: 'warm', css: 'saturate(1.15) sepia(0.18)', ff: 'colorbalance=rm=0.12:gm=0.04:bm=-0.12' },
-  { k: 'cool', css: 'saturate(1.1) hue-rotate(-12deg)', ff: 'colorbalance=rm=-0.1:bm=0.12' },
-  { k: 'vivid', css: 'saturate(1.5) contrast(1.12)', ff: 'eq=saturation=1.5:contrast=1.12' },
-  { k: 'bw', css: 'grayscale(1)', ff: 'hue=s=0' },
-  { k: 'vintage', css: 'sepia(0.45) contrast(0.92) saturate(1.1)', ff: 'curves=preset=vintage' }
-]
+export function filterPreviewCss(key, intensity = 100) {
+  const preset = FILTER_PRESETS.find((item) => item.k === key) || FILTER_PRESETS[0]
+  const amount = clamp(Number(intensity) || 0, 0, 100) / 100
+  return preset.css.map(([name, delta]) => {
+    if (name === 'hue-rotate') return `hue-rotate(${delta * amount}deg)`
+    if (name === 'sepia' || name === 'grayscale') return `${name}(${delta * amount})`
+    const value = 1 + delta * amount
+    return `${name}(${value})`
+  }).join(' ') || 'none'
+}
+export const FILTERS = FILTER_PRESETS.map((preset) => ({ ...preset, css: filterPreviewCss(preset.k, 100) }))
 export const TABS = [
   { k: 'media', Icon: Film }, { k: 'audio', Icon: Music }, { k: 'text', Icon: Type },
   { k: 'sticker', Icon: Smile }, { k: 'effect', Icon: Sparkles }, { k: 'trans', Icon: ArrowLeftRight }, { k: 'filter', Icon: SlidersHorizontal }

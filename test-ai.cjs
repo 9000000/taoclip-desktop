@@ -30,6 +30,9 @@ function gen(file, args) {
 }
 
 async function run() {
+  const initialModelStatus = aiv.getModelStatus()
+  check('model status reports bundled/cache availability', initialModelStatus.available && initialModelStatus.bytes > 10e6,
+    `(${initialModelStatus.state}, ${(initialModelStatus.bytes / 1e6).toFixed(1)}MB)`)
   console.log('1) Tai model RVM (neu chua co)...')
   const t0 = Date.now()
   const mp = await aiv.ensureModel((s) => {
@@ -75,6 +78,16 @@ async function run() {
   })
   const c3 = await ops.probe(p('ai_blur.mp4'))
   check('blur: dung thoi luong', near(c3.duration, 2), `(${c3.duration.toFixed(2)}s)`)
+
+  const cancelController = new AbortController()
+  let cancelRejected = false
+  try { fs.rmSync(p('ai_cancel.mp4'), { force: true }); fs.rmSync(p('ai_cancel.mp4.alpha.mkv'), { force: true }) } catch {}
+  try {
+    await aiv.replaceBackground({ input: p('aisrc.mp4'), start: 0, dur: 2, bg: { type: 'blur' }, output: p('ai_cancel.mp4'),
+      signal: cancelController.signal, onProgress: () => cancelController.abort() })
+  } catch (error) { cancelRejected = !!error.cancelled }
+  check('background job cancellation rejects, cleans matte temp, and preserves source/output target', cancelRejected &&
+    !fs.existsSync(p('ai_cancel.mp4')) && !fs.existsSync(p('ai_cancel.mp4.alpha.mkv')) && fs.existsSync(p('aisrc.mp4')))
 
   console.log(`\n================  ${pass} PASS / ${fail} FAIL  ================`)
   if (fail) process.exit(1)

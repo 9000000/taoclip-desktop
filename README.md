@@ -1,59 +1,63 @@
 # TaoClip Desktop
 
-TaoClip Desktop is a Windows video editor built with Electron, React, Vite and FFmpeg. It edits media locally on your computer and supports multi-clip projects, AI-assisted tools, and exports for common social video formats.
+Ứng dụng dựng video chạy cục bộ trên Windows, xây bằng Electron, React, Vite và FFmpeg. TaoClip hỗ trợ dựng timeline nhiều lớp, công cụ AI tùy chọn và xuất video cho các tỉ lệ phổ biến.
 
-**Website:** [taoclip.com](https://taoclip.com) · **Windows download:** [taoclip.com/tai-ve](https://taoclip.com/tai-ve/)
+**Website:** [taoclip.com](https://taoclip.com) · **Tải bản Windows:** [taoclip.com/tai-ve](https://taoclip.com/tai-ve/)
 
-![TaoClip Desktop screenshot](assets/taoclip-desktop-screenshot.png)
+![Giao diện TaoClip Desktop](assets/taoclip-desktop-screenshot.png)
 
-> This repository contains the application source code. It does not include the AI model files or the `yt-dlp` executable. The app downloads some assets when you use the related features.
+## Chức năng
 
-## Features
+- Nhập video, ảnh, GIF và audio; sắp xếp, trim, split, crop và thay đổi tốc độ clip.
+- Dựng timeline nhiều lớp, thêm chữ, sticker, phụ đề, nhạc nền và chuyển cảnh.
+- Phân tích khoảng lặng, tạo phụ đề, đọc văn bản và xử lý nền bằng các model AI tải riêng.
+- Lưu/mở project, relink media, thu thập media để chuyển project, undo/redo và khôi phục phiên.
+- Xuất MP4 bằng CPU hoặc encoder GPU khả dụng, chọn chất lượng và xuất nhiều tỉ lệ.
+- Tải media từ URL, dùng Google Cloud TTS và đổi khuôn mặt là các tính năng tùy chọn cần kết nối/cấu hình phù hợp.
 
-- Arrange video and image clips on a timeline, trim and split clips, and save projects.
-- Add text, stickers, filters, transitions, and background audio.
-- Generate captions and local text-to-speech with downloaded AI models.
-- Replace or blur video backgrounds; face swap is also available with separately downloaded models.
-- Detect silence and download supported videos from a URL.
-- Export MP4 in portrait, square, and landscape formats.
+## Yêu cầu
 
-Some features need an internet connection the first time they download their model or tool. Video editing and export run locally. Google Cloud Text-to-Speech sends the text you choose to Google's API when you enable that option.
+- Windows x64 để đóng gói hoặc chạy installer theo cấu hình hiện tại.
+- Node.js và npm cho môi trường phát triển.
+- Internet khi cài dependencies hoặc tải model/tool lần đầu.
 
-## Requirements
-
-- Windows 10 or 11, 64-bit
-- Node.js and npm
-- Internet access for dependency installation and first-time model/tool downloads
-
-## Run in development
+## Chạy bản phát triển
 
 ```bash
 npm install
 npm run dev
 ```
 
-## Build the Windows installer
+## Kiểm tra
+
+```bash
+npm run build
+npm test
+npm run test:ai
+npm run test:dl
+npm run test:face
+```
+
+Một số kiểm tra AI/tải xuống cần Internet và có thể tải file lớn.
+
+## Đóng gói Windows
 
 ```bash
 npm run dist
 ```
 
-The installer is written to `release/`.
+Electron Builder tạo installer trong `release/`. Installer chưa ký số nếu môi trường build không có chứng thư ký.
 
-## Tests
+## Dữ liệu và model bên thứ ba
 
-```bash
-npm test
-```
+Video, ảnh, audio và project được xử lý trên máy. Nếu bật Google Cloud TTS, đoạn văn bản bạn chọn sẽ được gửi tới Google để tổng hợp giọng nói. Model AI và công cụ được tải khi chạy có chủ sở hữu và điều khoản riêng; MIT license của mã nguồn TaoClip không cấp quyền phân phối lại các model đó. Hãy kiểm tra điều khoản của từng model trước khi sử dụng hoặc phân phối.
 
-Additional feature checks are available with `npm run test:ai`, `npm run test:dl`, and `npm run test:face`. The download tests may access external services and download large files.
+Chỉ tải media bạn có quyền sử dụng. Chỉ dùng tính năng đổi khuôn mặt khi có quyền và sự đồng ý phù hợp.
 
-## AI models and third-party tools
+## Đóng góp và báo lỗi
 
-AI models and tools downloaded by the app have their own owners and license terms. The MIT license in this repository applies to TaoClip Desktop source code; it does not grant rights to third-party models, media, or services. Check the relevant terms before using or redistributing those assets. The face analysis models referenced by the face-swap feature may be limited to non-commercial research use unless separately licensed.
-
-Only download media you have the right to use. Use face-swap features only with appropriate consent and rights.
+Mở issue hoặc pull request trên GitHub. Khi báo lỗi, ghi phiên bản app, phiên bản Windows, thao tác tái hiện và trạng thái CPU/GPU. Không đính kèm API key, dữ liệu riêng tư hoặc media nhạy cảm.
 
 ## License
 
-TaoClip Desktop source code is licensed under the MIT License. See [LICENSE](LICENSE).
+Mã nguồn TaoClip Desktop được phát hành theo MIT License. Xem [LICENSE](LICENSE).

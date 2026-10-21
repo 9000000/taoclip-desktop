@@ -20,41 +20,79 @@ function configure(ffmpegPath, modelDir) {
 }
 
 const MODEL_FILE = 'rvm_mobilenetv3_fp32.onnx'
+const MIN_MODEL_BYTES = 10e6
 const MODEL_URLS = [
   'https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/rvm_mobilenetv3_fp32.onnx'
 ]
 
 // Tai model neu chua co (luu .part roi rename de tranh file dut giua chung)
-async function ensureModel(onStatus) {
+async function ensureModel(onStatus, { signal } = {}) {
+  if (signal?.aborted) throw Object.assign(new Error('Đã hủy tải model.'), { cancelled: true })
+  if (!MODEL_DIR) throw new Error('Thư mục model AI chưa được cấu hình.')
   const dest = path.join(MODEL_DIR, MODEL_FILE)
-  if (fs.existsSync(dest) && fs.statSync(dest).size > 10e6) return dest
+  if (fs.existsSync(dest) && fs.statSync(dest).size > MIN_MODEL_BYTES) return dest
   fs.mkdirSync(MODEL_DIR, { recursive: true })
+  const bundled = path.resolve(__dirname, '..', 'models', MODEL_FILE)
+  if (fs.existsSync(bundled) && fs.statSync(bundled).size > MIN_MODEL_BYTES) {
+    if (onStatus) onStatus({ phase: 'install', bytes: fs.statSync(bundled).size })
+    const temp = dest + '.part'
+    try {
+      fs.copyFileSync(bundled, temp)
+      if (fs.existsSync(dest)) fs.rmSync(dest, { force: true })
+      fs.renameSync(temp, dest)
+      return dest
+    } catch (error) { try { fs.rmSync(temp, { force: true }) } catch {}; throw new Error(`Không cài được model AI đi kèm: ${error.message}`) }
+  }
   let lastErr = null
   for (const url of MODEL_URLS) {
+    let out = null
     try {
       if (onStatus) onStatus({ phase: 'download', progress: 0 })
-      const res = await fetch(url, { redirect: 'follow' })
+      const fetchSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000)
+      const res = await fetch(url, { redirect: 'follow', signal: fetchSignal })
       if (!res.ok) throw new Error('HTTP ' + res.status)
       const total = Number(res.headers.get('content-length')) || 0
       const tmp = dest + '.part'
-      const out = fs.createWriteStream(tmp)
+      out = fs.createWriteStream(tmp)
       let got = 0
       for await (const chunk of res.body) {
-        out.write(Buffer.from(chunk))
+        if (!out.write(Buffer.from(chunk))) await new Promise((resolve, reject) => { out.once('drain', resolve); out.once('error', reject) })
         got += chunk.length
         if (onStatus && total) onStatus({ phase: 'download', progress: Math.round((got / total) * 100) })
       }
-      await new Promise((resolve, reject) => out.end((e) => (e ? reject(e) : resolve())))
+      await new Promise((resolve, reject) => { out.once('error', reject); out.end(resolve) })
+      if (fs.statSync(tmp).size <= MIN_MODEL_BYTES) throw new Error('File tải về quá nhỏ, model chưa hoàn chỉnh.')
+      if (fs.existsSync(dest)) fs.rmSync(dest, { force: true })
       fs.renameSync(tmp, dest)
       return dest
-    } catch (e) { lastErr = e }
+    } catch (e) {
+      lastErr = e
+      if (out && !out.closed) {
+        out.destroy()
+        await new Promise((resolve) => out.once('close', resolve))
+      }
+      try { fs.rmSync(dest + '.part', { force: true }) } catch {}
+    }
   }
   throw new Error('Tai model AI loi: ' + (lastErr && lastErr.message))
 }
 
+function getModelStatus() {
+  const cachedPath = MODEL_DIR ? path.join(MODEL_DIR, MODEL_FILE) : null
+  const bundledPath = path.resolve(__dirname, '..', 'models', MODEL_FILE)
+  const inspect = (file) => {
+    try { const bytes = fs.statSync(file).size; return { exists: true, bytes, valid: bytes > MIN_MODEL_BYTES } }
+    catch { return { exists: false, bytes: 0, valid: false } }
+  }
+  const cached = cachedPath ? inspect(cachedPath) : { exists: false, bytes: 0, valid: false }
+  const bundled = inspect(bundledPath)
+  return { model: MODEL_FILE, cached: cached.valid, bundled: bundled.valid, available: cached.valid || bundled.valid,
+    state: cached.valid ? 'cached' : bundled.valid ? 'bundled' : 'not-cached', bytes: cached.valid ? cached.bytes : bundled.bytes }
+}
+
 // ---------- Pass 1: video -> alpha matte (FFV1 gray, lossless) ----------
 // Chay RVM tung frame qua pipe rawvideo; recurrent state giup nen on dinh giua cac frame.
-function mattePass({ input, start, dur, pw, ph, fps, session, ort, output, onProgress }) {
+function mattePass({ input, start, dur, pw, ph, fps, session, ort, output, onProgress, signal }) {
   return new Promise((resolve, reject) => {
     let done = false
     const dec = spawn(FFMPEG_PATH, ['-v', 'error', '-ss', String(start), '-t', String(dur), '-i', path.resolve(input),
@@ -64,7 +102,18 @@ function mattePass({ input, start, dur, pw, ph, fps, session, ort, output, onPro
     let decErr = '', encErr = ''
     dec.stderr.on('data', (d) => (decErr += d))
     enc.stderr.on('data', (d) => (encErr += d))
-    const fail = (e) => { if (!done) { done = true; try { dec.kill() } catch {} try { enc.kill() } catch {} reject(e) } }
+    const abort = () => fail(Object.assign(new Error('Đã hủy tác vụ thay nền.'), { cancelled: true }))
+    const fail = (e) => {
+      if (done) return
+      done = true; signal?.removeEventListener('abort', abort)
+      const children = [dec, enc]
+      const stopped = children.map((child) => child.exitCode != null || child.signalCode != null
+        ? Promise.resolve() : new Promise((resolve) => child.once('close', resolve)))
+      for (const child of children) { try { child.kill('SIGKILL') } catch {} }
+      Promise.all(stopped).then(() => reject(e))
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
     dec.on('error', fail); enc.on('error', fail)
     enc.stdin.on('error', () => {}) // EPIPE khi enc chet -> close se bao loi
 
@@ -118,7 +167,7 @@ function mattePass({ input, start, dur, pw, ph, fps, session, ort, output, onPro
     dec.on('close', (c) => { if (c !== 0) fail(new Error('decode loi: ' + decErr.slice(-300))) })
     enc.on('close', (c) => {
       if (done) return
-      if (c === 0 && frames > 0) { done = true; resolve(frames) }
+      if (c === 0 && frames > 0) { done = true; signal?.removeEventListener('abort', abort); resolve(frames) }
       else fail(new Error('alpha encode loi: ' + (encErr.slice(-300) || 'khong co frame nao')))
     })
   })
@@ -126,7 +175,7 @@ function mattePass({ input, start, dur, pw, ph, fps, session, ort, output, onPro
 
 // ---------- Pass 2: composite goc + alpha len nen moi ----------
 // bg: {type:'blur'} | {type:'color', color:'#rrggbb'} | {type:'image', path}
-function compositePass({ input, start, dur, alpha, bg, W, H, fps, hasAudio, output, onProgress }) {
+function compositePass({ input, start, dur, alpha, bg, W, H, fps, hasAudio, output, onProgress, signal }) {
   return new Promise((resolve, reject) => {
     const args = ['-y', '-ss', String(start), '-t', String(dur), '-i', path.resolve(input), '-i', path.resolve(alpha)]
     const fc = []
@@ -152,14 +201,21 @@ function compositePass({ input, start, dur, alpha, bg, W, H, fps, hasAudio, outp
     else args.push('-an')
     args.push(...ops.vencArgs(), '-r', String(fps), '-movflags', '+faststart', path.resolve(output))
     const ps = spawn(FFMPEG_PATH, args)
+    let settled = false, cancelled = false
+    const abort = () => { cancelled = true; try { ps.kill('SIGKILL') } catch {} }
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
     let err = ''
     ps.stderr.on('data', (d) => {
       err += d
       const m = /time=(\d+):(\d+):(\d+\.\d+)/.exec(d.toString())
       if (m && onProgress) onProgress(((+m[1]) * 3600 + (+m[2]) * 60 + (+m[3])) / dur * 100)
     })
-    ps.on('error', reject)
-    ps.on('close', (c) => c === 0 ? resolve(output) : reject(new Error('composite loi: ' + err.slice(-400))))
+    ps.on('error', (error) => { signal?.removeEventListener('abort', abort); if (!settled) { settled = true; reject(error) } })
+    ps.on('close', (c) => { signal?.removeEventListener('abort', abort); if (settled) return; settled = true
+      if (cancelled) reject(Object.assign(new Error('Đã hủy tác vụ thay nền.'), { cancelled: true }))
+      else c === 0 ? resolve(output) : reject(new Error('composite loi: ' + err.slice(-400)))
+    })
   })
 }
 
@@ -167,7 +223,9 @@ let sessionPromise = null
 async function getSession(modelPath) {
   if (!sessionPromise) {
     const ort = require('onnxruntime-node')
-    sessionPromise = ort.InferenceSession.create(modelPath).then((s) => ({ ort, session: s }))
+    const pending = ort.InferenceSession.create(modelPath).then((s) => ({ ort, session: s }))
+    sessionPromise = pending
+    try { return await pending } catch (error) { if (sessionPromise === pending) sessionPromise = null; throw error }
   }
   return sessionPromise
 }
@@ -175,11 +233,12 @@ async function getSession(modelPath) {
 // ---------- API chinh: thay nen 1 doan video ----------
 // opts: { input, start, dur, bg, output, procWidth?, fps?, onStatus?, onProgress? }
 // onProgress: 0-100 (matte chiem 80%, composite 20%)
-async function replaceBackground({ input, start = 0, dur, bg, output, procWidth = 640, fps = 30, onStatus, onProgress }) {
+async function replaceBackground({ input, start = 0, dur, bg, output, procWidth = 640, fps = 30, onStatus, onProgress, signal }) {
   if (!FFMPEG_PATH || !MODEL_DIR) throw new Error('ai-video chua duoc configure')
-  const modelPath = await ensureModel(onStatus)
+  const modelPath = await ensureModel(onStatus, { signal })
   if (onStatus) onStatus({ phase: 'load' })
   const { ort, session } = await getSession(modelPath)
+  if (signal?.aborted) throw Object.assign(new Error('Đã hủy tác vụ thay nền.'), { cancelled: true })
   const info = await ops.probe(input)
   if (!info.width || !info.height) throw new Error('Khong doc duoc kich thuoc video')
   // Chan kich thuoc CHAN (yuv420p yeu cau); composite ep foreground/alpha/bg ve W:H nay
@@ -194,15 +253,17 @@ async function replaceBackground({ input, start = 0, dur, bg, output, procWidth 
     if (onStatus) onStatus({ phase: 'matte' })
     await mattePass({
       input, start, dur, pw, ph, fps, session, ort, output: tmpAlpha,
+      signal,
       onProgress: (f, tot) => onProgress && onProgress(Math.min(80, Math.round((f / tot) * 80)))
     })
     if (onStatus) onStatus({ phase: 'composite' })
     await compositePass({
       input, start, dur, alpha: tmpAlpha, bg, W, H, fps, hasAudio: info.hasAudio, output,
+      signal,
       onProgress: (p) => onProgress && onProgress(Math.min(100, Math.round(80 + p * 0.2)))
     })
     return { ok: true, output }
   } finally { try { fs.rmSync(tmpAlpha, { force: true }) } catch {} }
 }
 
-module.exports = { configure, ensureModel, replaceBackground }
+module.exports = { configure, ensureModel, getModelStatus, replaceBackground }

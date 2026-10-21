@@ -9,9 +9,13 @@ release/
 models/inswapper_128.onnx
 models/w600k_r50.onnx
 
-# Runtime-downloaded tools and AI models. Verify each model license before redistribution.
-bin/
-models/
+# Codex build/check scratch artifacts
+.codex-release*/
+.codex-tmp/
 .env
 .env.*
 !.env.example
+
+# Runtime-downloaded model/tool files are not redistributed by this repository.
+bin/
+models/

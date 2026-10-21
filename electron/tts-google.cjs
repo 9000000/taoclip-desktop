@@ -4,12 +4,13 @@
 //  Doc: https://cloud.google.com/text-to-speech/docs/reference/rest
 // ============================================================
 const fs = require('fs')
+const { splitGoogleText } = require('./tts-text.cjs')
 
 const BASE = 'https://texttospeech.googleapis.com/v1'
 
 // Phan loai giong theo ten (de UI gom nhom)
 function voiceType(name) {
-  if (/Chirp3-HD|Chirp-HD|Chirp/i.test(name)) return 'Chirp3-HD'
+  if (/(?:^|-)Chirp3-HD(?:-|$)/i.test(name)) return 'Chirp3-HD'
   if (/Neural2/i.test(name)) return 'Neural2'
   if (/Studio/i.test(name)) return 'Studio'
   if (/Wavenet/i.test(name)) return 'WaveNet'
@@ -18,20 +19,28 @@ function voiceType(name) {
   return 'Khac'
 }
 
-// Chirp/Chirp3-HD khong ho tro pitch (Google tra loi 400 neu gui). Bo pitch cho nhom nay.
-function supportsPitch(name) {
-  return !/Chirp/i.test(name)
+// The official Voices resource has no per-voice feature fields. Google documents
+// Chirp 3 HD as not supporting speakingRate or pitch; other published tiers use
+// the AudioConfig capabilities. Keep this mapping in one place for UI and API.
+function voiceCapabilities(name) {
+  const type = voiceType(name)
+  return type === 'Chirp3-HD' ? { speakingRate: false, pitch: false, source: 'google-voice-family' }
+    : { speakingRate: true, pitch: true, source: 'google-audio-config' }
 }
 
 async function errMsg(res) {
-  let detail = ''
-  try {
-    const j = await res.json()
-    detail = (j.error && j.error.message) || JSON.stringify(j)
-  } catch (e) {
-    detail = await res.text().catch(() => '')
-  }
+  const body = await res.text().catch(() => '')
+  let detail = body
+  try { const json = JSON.parse(body); detail = (json.error && json.error.message) || body } catch {}
   return `Google TTS ${res.status}: ${detail || res.statusText}`
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
+  try { return await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) }) }
+  catch (error) {
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') throw new Error('Google TTS hết thời gian chờ. Hãy kiểm tra mạng rồi thử lại.')
+    throw new Error(`Không kết nối được Google TTS: ${error.message}`)
+  }
 }
 
 // Liet ke giong doc. langCode rong => tra ve tat ca ngon ngu.
@@ -39,14 +48,14 @@ async function listVoices(apiKey, langCode = 'vi-VN') {
   if (!apiKey) throw new Error('Chua co Google API key')
   let url = `${BASE}/voices?key=${encodeURIComponent(apiKey)}`
   if (langCode) url += `&languageCode=${encodeURIComponent(langCode)}`
-  const res = await fetch(url)
+  const res = await fetchWithTimeout(url)
   if (!res.ok) throw new Error(await errMsg(res))
   const data = await res.json()
   const voices = (data.voices || []).map((v) => ({
     name: v.name,
     lang: (v.languageCodes && v.languageCodes[0]) || langCode,
     gender: v.ssmlGender || 'NEUTRAL',
-    type: voiceType(v.name)
+    type: voiceType(v.name), capabilities: voiceCapabilities(v.name)
   }))
   // Sap xep: theo loai (chat luong cao truoc) roi theo ten
   const order = { 'Chirp3-HD': 0, Neural2: 1, Studio: 2, WaveNet: 3, Polyglot: 4, Standard: 5, Khac: 6 }
@@ -64,15 +73,20 @@ async function synthesize(text, outFile, opts = {}) {
   if (!apiKey) throw new Error('Chua co Google API key')
   if (!voiceName) throw new Error('Chua chon giong doc')
 
-  const audioConfig = { audioEncoding: encoding, speakingRate: rate }
-  if (supportsPitch(voiceName)) audioConfig.pitch = pitch
+  const caps = voiceCapabilities(voiceName)
+  if (Buffer.byteLength(String(text), 'utf8') > 5000) throw new Error('Google TTS giới hạn 5.000 byte cho mỗi yêu cầu.')
+  if (rate < 0.25 || rate > 2) throw new Error('Tốc độ Google TTS phải từ 0,25× đến 2×.')
+  if (pitch < -20 || pitch > 20) throw new Error('Cao độ Google TTS phải từ -20 đến 20.')
+  const audioConfig = { audioEncoding: encoding }
+  if (caps.speakingRate) audioConfig.speakingRate = rate
+  if (caps.pitch) audioConfig.pitch = pitch
 
   const body = {
     input: ssml ? { ssml: String(text) } : { text: String(text) },
     voice: { languageCode: langCode, name: voiceName },
     audioConfig
   }
-  const res = await fetch(`${BASE}/text:synthesize?key=${encodeURIComponent(apiKey)}`, {
+  const res = await fetchWithTimeout(`${BASE}/text:synthesize?key=${encodeURIComponent(apiKey)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
@@ -84,4 +98,4 @@ async function synthesize(text, outFile, opts = {}) {
   return { path: outFile }
 }
 
-module.exports = { listVoices, synthesize, voiceType }
+module.exports = { listVoices, synthesize, voiceType, voiceCapabilities, splitGoogleText }

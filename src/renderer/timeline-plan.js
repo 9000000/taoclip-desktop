@@ -6,6 +6,13 @@ function positive(value, label) {
   return n
 }
 
+export function snapToFrameTime(time, fps = 30) {
+  const rate = positive(fps, 'FPS')
+  const value = Number(time)
+  if (!Number.isFinite(value)) throw new Error('Thời gian cần snap không hợp lệ.')
+  return Math.round(value * rate) / rate
+}
+
 /** Build the shared, source-addressable output timeline for primary clips. */
 export function buildTimelinePlan(clips, { transition = 'none', transitionDuration = 0.5, keepByClip = {} } = {}) {
   if (!Array.isArray(clips)) throw new Error('Danh sách clip không hợp lệ.')
@@ -46,6 +53,25 @@ export function buildTimelinePlan(clips, { transition = 'none', transitionDurati
   return { entries, duration, transition, transitionDuration: Number(transitionDuration) || 0 }
 }
 
+/** Find a shared still-image duration that fits a target music duration around V1 and transitions. */
+export function fitImageDurationToTarget(clips, targetDuration, options = {}) {
+  const images = clips.filter((clip) => clip.kind === 'image')
+  const target = Number(targetDuration)
+  if (!images.length || !Number.isFinite(target) || target <= 0) return null
+  const timelineAt = (imageDuration) => buildTimelinePlan(clips.map((clip) => clip.kind === 'image'
+    ? { ...clip, in: 0, out: imageDuration, speed: 1 } : clip), options).duration
+  let low = 0.5, high = 30
+  if (timelineAt(low) <= target && timelineAt(high) >= target) {
+    for (let i = 0; i < 32; i++) {
+      const mid = (low + high) / 2
+      if (timelineAt(mid) < target) low = mid; else high = mid
+    }
+  } else if (timelineAt(low) > target) high = low
+  else low = high
+  const imageDuration = Math.max(0.5, Math.min(30, (low + high) / 2))
+  return { imageDuration, timelineDuration: timelineAt(imageDuration) }
+}
+
 /** Map a source range to every corresponding output range (clip may be reused). */
 export function mapSourceRange(plan, clipId, sourceStart, sourceEnd) {
   const a0 = Number(sourceStart), b0 = Number(sourceEnd)
@@ -63,11 +89,61 @@ export function mapSourceRange(plan, clipId, sourceStart, sourceEnd) {
 export function mapTimelineTime(plan, time) {
   const t = Number(time)
   if (!Number.isFinite(t) || t < 0) return []
-  return plan.entries.filter((entry) => t >= entry.start && t < entry.end).map((entry) => ({
+  return plan.entries.flatMap((entry, entryIndex) => t >= entry.start && t < entry.end ? [{
     clipId: entry.clipId,
     sourceTime: entry.sourceStart + (t - entry.start) * entry.speed,
-    kind: entry.kind
-  }))
+    kind: entry.kind,
+    entryIndex
+  }] : [])
+}
+
+/** Pick a single-source preview at the transition midpoint; export still blends both entries. */
+export function resolvePreviewSource(plan, time) {
+  const active = mapTimelineTime(plan, time)
+  if (active.length < 2) return active[0] || null
+  const entries = plan.entries.filter((entry) => time >= entry.start && time < entry.end)
+  const incomingIndex = entries.findIndex((entry) => entry.overlapIn > 0)
+  if (incomingIndex < 0) return active[active.length - 1]
+  const incoming = entries[incomingIndex]
+  const midpoint = incoming.start + incoming.overlapIn / 2
+  return active[time >= midpoint ? incomingIndex : Math.max(0, incomingIndex - 1)]
+}
+
+/** Split a timeline interval at clip/transition boundaries and anchor each piece to its preview source. */
+export function mapTimelineRangeToSources(plan, start, end) {
+  const a = Number(start), b = Number(end)
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return []
+  const cuts = new Set([a, b])
+  for (const entry of plan.entries) {
+    if (entry.start > a && entry.start < b) cuts.add(entry.start)
+    if (entry.end > a && entry.end < b) cuts.add(entry.end)
+    if (entry.overlapIn > 0) {
+      const middle = entry.start + entry.overlapIn / 2
+      if (middle > a && middle < b) cuts.add(middle)
+    }
+  }
+  const points = [...cuts].sort((x, y) => x - y)
+  const result = []
+  for (let i = 0; i < points.length - 1; i++) {
+    const timelineStart = points[i], timelineEnd = points[i + 1]
+    const source = resolvePreviewSource(plan, (timelineStart + timelineEnd) / 2)
+    if (!source) continue
+    const entry = plan.entries.find((item) => item.clipId === source.clipId &&
+      (timelineStart + timelineEnd) / 2 >= item.start && (timelineStart + timelineEnd) / 2 < item.end)
+    if (!entry) continue
+    result.push({ clipId: entry.clipId, start: timelineStart, end: timelineEnd,
+      sourceStart: entry.sourceStart + (timelineStart - entry.start) * entry.speed,
+      sourceEnd: entry.sourceStart + (timelineEnd - entry.start) * entry.speed })
+  }
+  return result.reduce((merged, range) => {
+    const prior = merged[merged.length - 1]
+    if (prior && prior.clipId === range.clipId && Math.abs(prior.end - range.start) < EPSILON &&
+        Math.abs(prior.sourceEnd - range.sourceStart) < EPSILON) {
+      prior.end = range.end
+      prior.sourceEnd = range.sourceEnd
+    } else merged.push({ ...range })
+    return merged
+  }, [])
 }
 
 export function toExportSegments(plan) {

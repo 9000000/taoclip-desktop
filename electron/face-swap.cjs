@@ -35,19 +35,21 @@ const MODELS = {
   ], min: 500e6 }
 }
 
-async function downloadFile(urls, dest, min, onStatus, label) {
+async function downloadFile(urls, dest, min, onStatus, label, signal) {
   if (fs.existsSync(dest) && fs.statSync(dest).size >= min) return dest
   fs.mkdirSync(path.dirname(dest), { recursive: true })
   let lastErr = null
   for (const url of urls) {
     try {
-      const res = await fetch(url, { redirect: 'follow' })
+      if (signal?.aborted) throw Object.assign(new Error('CANCELLED'), { code: 'CANCELLED' })
+      const res = await fetch(url, { redirect: 'follow', signal })
       if (!res.ok) throw new Error('HTTP ' + res.status)
       const total = Number(res.headers.get('content-length')) || 0
       const tmp = dest + '.part'
       const out = fs.createWriteStream(tmp)
       let got = 0
       for await (const chunk of res.body) {
+        if (signal?.aborted) throw Object.assign(new Error('CANCELLED'), { code: 'CANCELLED' })
         out.write(Buffer.from(chunk))
         got += chunk.length
         if (onStatus && total) onStatus({ phase: 'download', file: label, progress: Math.round((got / total) * 100) })
@@ -56,15 +58,15 @@ async function downloadFile(urls, dest, min, onStatus, label) {
       if (fs.statSync(tmp).size < min) { fs.rmSync(tmp, { force: true }); throw new Error('file thieu') }
       fs.renameSync(tmp, dest)
       return dest
-    } catch (e) { lastErr = e }
+    } catch (e) { try { fs.rmSync(dest + '.part', { force: true }) } catch {}; if (signal?.aborted) throw Object.assign(new Error('CANCELLED'), { code: 'CANCELLED' }); lastErr = e }
   }
   throw new Error(`Tai model ${label} loi: ` + (lastErr && lastErr.message))
 }
 
-async function ensureModels(onStatus) {
+async function ensureModels(onStatus, signal) {
   const paths = {}
   for (const [k, m] of Object.entries(MODELS)) {
-    paths[k] = await downloadFile(m.urls, path.join(MODEL_DIR, m.file), m.min, onStatus, m.file)
+    paths[k] = await downloadFile(m.urls, path.join(MODEL_DIR, m.file), m.min, onStatus, m.file, signal)
   }
   return paths
 }
@@ -262,6 +264,16 @@ async function detectFaces(ctx, frame, W, H, thr = 0.5) {
   return faces
 }
 
+function requireOneFace(faces, code, context) {
+  if (!faces.length) return null
+  if (faces.length > 1) {
+    const e = new Error(`${context} co nhieu khuon mat; vui long chi dinh dung mot nguoi.`)
+    e.code = code
+    throw e
+  }
+  return faces[0]
+}
+
 // ---------- ArcFace embedding (source) -> latent (nhan emap, chuan hoa) ----------
 async function faceLatent(ctx, frame, W, H, face) {
   const M = similarityTransform(face.kps, dstFor(112))
@@ -365,10 +377,10 @@ function decodeImage(imgPath) {
 }
 
 let ctxPromise = null
-async function getCtx(onStatus) {
+async function getCtx(onStatus, signal) {
   if (!ctxPromise) {
     ctxPromise = (async () => {
-      const paths = await ensureModels(onStatus)
+      const paths = await ensureModels(onStatus, signal)
       if (onStatus) onStatus({ phase: 'load' })
       const ort = require('onnxruntime-node')
       const emap = extractEmap(paths.swap, path.join(MODEL_DIR, 'emap.bin'))
@@ -404,30 +416,29 @@ async function faceEmbedding(ctx, frame, W, H, face) {
   for (let i = 0; i < 512; i++) emb[i] /= nrm
   return emb
 }
-// Embedding tho cua mat lon nhat trong 1 anh
+// Embedding khuon mat duy nhat trong anh. Khong tu chon mat lon nhat vi co the sai nguoi.
 async function imageEmbedding(ctx, imagePath) {
   const { frame, W, H } = await decodeImage(imagePath)
   const faces = await detectFaces(ctx, frame, W, H)
   if (!faces.length) throw new Error('Khong tim thay mat trong anh')
-  faces.sort((a, b) => b.area - a.area)
-  return faceEmbedding(ctx, frame, W, H, faces[0])
+  return faceEmbedding(ctx, frame, W, H, requireOneFace(faces, 'MULTIPLE_SOURCE_FACES', 'Anh nguon'))
 }
 
-// Lay latent tu ANH khuon mat nguon (mat lon nhat trong anh)
+// Lay latent tu anh nguon chi khi co dung mot khuon mat.
 async function sourceLatent(ctx, imagePath) {
   const { frame, W, H } = await decodeImage(imagePath)
   const faces = await detectFaces(ctx, frame, W, H)
   if (!faces.length) { const e = new Error('Khong tim thay khuon mat trong anh nguon'); e.code = 'NO_SOURCE_FACE'; throw e }
-  faces.sort((a, b) => b.area - a.area)
-  return faceLatent(ctx, frame, W, H, faces[0])
+  return faceLatent(ctx, frame, W, H, requireOneFace(faces, 'MULTIPLE_SOURCE_FACES', 'Anh nguon'))
 }
 
 // ---------- API chinh: doi mat 1 doan video ----------
 // opts: { input, start, dur, sourceImage, output, fps?, onStatus?, onProgress? }
-// Swap khuon mat LON NHAT moi frame; frame khong co mat -> giu nguyen.
-async function swapFaceVideo({ input, start = 0, dur, sourceImage, output, fps = 30, onStatus, onProgress }) {
+// Chi chap nhan video mot nguoi: nhieu mat tren mot frame la tinh huong mo ho, khong tu swap mat lon nhat.
+async function swapFaceVideo({ input, start = 0, dur, sourceImage, output, fps = 30, onStatus, onProgress, signal }) {
   if (!FFMPEG_PATH || !MODEL_DIR) throw new Error('face-swap chua duoc configure')
-  const ctx = await getCtx(onStatus)
+  if (signal?.aborted) throw Object.assign(new Error('CANCELLED'), { code: 'CANCELLED' })
+  const ctx = await getCtx(onStatus, signal)
   if (onStatus) onStatus({ phase: 'source' })
   const latent = await sourceLatent(ctx, sourceImage)
   const info = await ops.probe(input)
@@ -449,14 +460,26 @@ async function swapFaceVideo({ input, start = 0, dur, sourceImage, output, fps =
     let decErr = '', encErr = ''
     dec.stderr.on('data', (d) => (decErr += d))
     enc.stderr.on('data', (d) => (encErr += d))
-    const fail = (e) => { if (!done) { done = true; try { dec.kill() } catch {} try { enc.kill() } catch {} reject(e) } }
+    const fail = (e) => {
+      if (done) return
+      done = true
+      try { dec.kill() } catch {}
+      try { enc.kill() } catch {}
+      const closed = (child) => child.exitCode !== null || child.signalCode !== null
+        ? Promise.resolve()
+        : new Promise((resolve) => child.once('close', resolve))
+      Promise.all([closed(dec), closed(enc)]).then(() => reject(e))
+    }
+    const abort = () => { const e = Object.assign(new Error('CANCELLED'), { code: 'CANCELLED' }); fail(e) }
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
     dec.on('error', fail); enc.on('error', fail)
     enc.stdin.on('error', () => {})
 
     const frameSize = W * H * 3
     const totalEst = Math.max(1, Math.ceil(dur * fps))
     let buf = Buffer.alloc(0)
-    let frames = 0, swapped = 0, processing = false, decEnded = false
+    let frames = 0, swapped = 0, framesWithFace = 0, framesWithoutFace = 0, processing = false, decEnded = false
 
     async function pump() {
       if (processing || done) return
@@ -466,11 +489,12 @@ async function swapFaceVideo({ input, start = 0, dur, sourceImage, output, fps =
           const frame = Buffer.from(buf.subarray(0, frameSize)) // copy: se sua tai cho
           buf = buf.subarray(frameSize)
           const faces = await detectFaces(ctx, frame, W, H)
-          if (faces.length) {
-            faces.sort((a, b) => b.area - a.area)
-            await swapFaceInFrame(ctx, frame, W, H, faces[0], latent)
+          const face = requireOneFace(faces, 'MULTIPLE_TARGET_FACES', `Video tai khoang ${((frames / fps) + start).toFixed(2)}s`)
+          if (face) {
+            await swapFaceInFrame(ctx, frame, W, H, face, latent)
             swapped++
-          }
+            framesWithFace++
+          } else framesWithoutFace++
           if (!enc.stdin.write(frame)) await new Promise((r) => enc.stdin.once('drain', r))
           frames++
           if (onProgress) onProgress(Math.min(99, Math.round((frames / totalEst) * 100)))
@@ -489,11 +513,12 @@ async function swapFaceVideo({ input, start = 0, dur, sourceImage, output, fps =
     dec.stdout.on('end', () => { decEnded = true; pump() })
     dec.on('close', (c) => { if (c !== 0) fail(new Error('decode loi: ' + decErr.slice(-300))) })
     enc.on('close', (c) => {
+      signal?.removeEventListener('abort', abort)
       if (done) return
-      if (c === 0 && frames > 0) { done = true; resolve({ ok: true, output, frames, swapped }) }
+      if (c === 0 && frames > 0) { done = true; resolve({ ok: true, output, frames, swapped, framesWithFace, framesWithoutFace, fps }) }
       else fail(new Error('encode loi: ' + (encErr.slice(-300) || 'khong co frame nao')))
     })
   })
 }
 
-module.exports = { configure, ensureModels, extractEmap, similarityTransform, swapFaceVideo, sourceLatent, getCtx, detectFaces, decodeImage, imageEmbedding, faceEmbedding }
+module.exports = { configure, ensureModels, extractEmap, similarityTransform, requireOneFace, swapFaceVideo, sourceLatent, getCtx, detectFaces, decodeImage, imageEmbedding, faceEmbedding }
